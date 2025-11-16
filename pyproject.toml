@@ -1,0 +1,17 @@
+[project]
+name = "comfyui-runpoddirect" # Unique identifier for your node. Immutable after creation.
+description = "Server-side model download extension for ComfyUI on RunPod - Download missing models directly to your pod with multi-connection downloads, queue management, and real-time progress tracking"
+version = "1.0.2" # Custom Node version. Must be semantically versioned.
+license = { file = "LICENSE" }
+dependencies = [
+    "aiohttp>=3.8.0",
+]
+
+[project.urls]
+Repository = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect"
+
+[tool.comfy]
+PublisherId = "MadiatorLabs" # Publisher ID from Comfy Registry Website
+DisplayName = "RunpodDirect" # Display name for the Custom Node
+Icon = "" # Optional: SVG, PNG, JPG or GIF (MAX. 800x400px)
+
