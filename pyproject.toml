@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-runpoddirect"
 description = "Server-side model download extension for ComfyUI on Runpod - Download missing models directly to your pod with multi-connection downloads, queue management, and real-time progress tracking"
-version = "1.0.4"
+version = "1.0.5"
 license = {file = "LICENSE"}
 authors = [
     {name = "Madiator2011"},
@@ -31,5 +31,5 @@ Documentation = "https://github.com/MadiatorLabs/ComfyUI-RunpodDirect#readme"
 [tool.comfy]
 PublisherId = "madiator2011"
 DisplayName = "Madiator2011"
-Icon = "https://avatars.githubusercontent.com/u/236864052?s=48&v=4"
+Icon = "https://peer.madiator.cloud/lazy-static/avatars/769f014a-9bc4-45e4-8fb5-57512aea2e97.png"
 includes = []

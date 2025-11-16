@@ -527,7 +527,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
