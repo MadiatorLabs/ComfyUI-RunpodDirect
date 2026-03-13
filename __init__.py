@@ -31,6 +31,7 @@ async def start_download(request):
         url = json_data.get("url")
         save_path = json_data.get("save_path")  # e.g., "checkpoints"
         filename = json_data.get("filename")    # e.g., "model.safetensors"
+        token = json_data.get("token")          # Optional HF token for gated models
 
         if not url or not save_path or not filename:
             return web.json_response(
@@ -103,11 +104,15 @@ async def start_download(request):
             "priority": None
         }
 
+        # Resolve token: prefer explicit token, fall back to HF_TOKEN env var
+        resolved_token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
         # Add to queue
         download_queue.append({
             "download_id": download_id,
             "url": url,
-            "output_path": output_path
+            "output_path": output_path,
+            "token": resolved_token
         })
 
         # Process queue (will start download if slot available)
@@ -145,6 +150,7 @@ async def process_download_queue():
     download_id = download_item["download_id"]
     url = download_item["url"]
     output_path = download_item["output_path"]
+    token = download_item.get("token")
 
     # Set status to downloading
     active_downloads[download_id]["status"] = "downloading"
@@ -162,7 +168,7 @@ async def process_download_queue():
     })
 
     # Start download task
-    current_download_task = asyncio.create_task(download_file(url, output_path, download_id))
+    current_download_task = asyncio.create_task(download_file(url, output_path, download_id, token=token))
 
     # Add completion callback to process next in queue
     current_download_task.add_done_callback(lambda t: on_download_complete(download_id))
@@ -201,7 +207,7 @@ async def download_chunk(session, url, start, end, output_path, chunk_index, dow
         return None
 
 
-async def download_file(url, output_path, download_id):
+async def download_file(url, output_path, download_id, token=None):
     """Download file with multi-connection support and progress tracking"""
     import aiohttp
 
@@ -216,19 +222,44 @@ async def download_file(url, output_path, download_id):
             "lock": asyncio.Lock()   # Lock for thread-safe updates
         }
 
+        # Build auth headers for gated HF models
+        auth_headers = {}
+        if token and 'huggingface.co' in url:
+            auth_headers['Authorization'] = f'Bearer {token}'
+            logging.info(f"[RunpodDirect] Using HF token for {download_id}")
+
         timeout = aiohttp.ClientTimeout(total=None)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, headers=auth_headers) as session:
             # Get file size - try HEAD first, then fall back to GET with Range
             total_size = 0
             supports_range = False
 
+            # Helper to detect gated/auth errors and produce a useful message
+            def _check_gated_error(status_code, request_url):
+                if status_code in (401, 403, 451) and 'huggingface.co' in request_url:
+                    # Convert download URL to repo URL for the user
+                    # e.g. https://huggingface.co/org/repo/resolve/main/file.ext -> https://huggingface.co/org/repo
+                    repo_url = request_url
+                    resolve_idx = request_url.find('/resolve/')
+                    if resolve_idx != -1:
+                        repo_url = request_url[:resolve_idx]
+                    if status_code == 401:
+                        raise Exception(f"Authentication required. Provide a valid HF token. Repo: {repo_url}")
+                    elif status_code == 403:
+                        raise Exception(f"Access denied — you may need to accept the model's terms at {repo_url}")
+                    elif status_code == 451:
+                        raise Exception(f"Model is restricted. Accept the license agreement at {repo_url}")
+
             try:
                 # Try HEAD request first
                 async with session.head(url, allow_redirects=True) as response:
+                    _check_gated_error(response.status, url)
                     if response.status == 200:
                         total_size = int(response.headers.get('content-length', 0))
                         supports_range = response.headers.get('accept-ranges') == 'bytes'
             except Exception as e:
+                if 'Accept the license' in str(e) or 'Access denied' in str(e) or 'Authentication required' in str(e):
+                    raise
                 logging.warning(f"HEAD request failed for {download_id}: {e}")
 
             # If HEAD didn't give us the size, try GET with Range header
@@ -237,6 +268,7 @@ async def download_file(url, output_path, download_id):
                 try:
                     headers = {'Range': 'bytes=0-0'}
                     async with session.get(url, headers=headers, allow_redirects=True) as response:
+                        _check_gated_error(response.status, url)
                         if response.status in [200, 206]:
                             # Try to get size from Content-Range header first
                             content_range = response.headers.get('content-range', '')
@@ -251,6 +283,8 @@ async def download_file(url, output_path, download_id):
                             if total_size == 0:
                                 total_size = int(response.headers.get('content-length', 0))
                 except Exception as e:
+                    if 'Accept the license' in str(e) or 'Access denied' in str(e) or 'Authentication required' in str(e):
+                        raise
                     logging.warning(f"GET with Range failed for {download_id}: {e}")
 
             if total_size == 0:
@@ -340,6 +374,9 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
 
     try:
         async with session.get(url, headers=headers) as response:
+            if response.status in (401, 403, 451) and 'huggingface.co' in url:
+                repo_url = url[:url.find('/resolve/')] if '/resolve/' in url else url
+                raise Exception(f"Access denied — accept the model's terms at {repo_url}")
             if response.status not in [200, 206]:
                 raise Exception(f"HTTP {response.status} for chunk {chunk_index}")
 
@@ -391,6 +428,9 @@ async def download_single_connection(session, url, output_path, download_id, tot
     downloaded_size = 0
 
     async with session.get(url) as response:
+        if response.status in (401, 403, 451) and 'huggingface.co' in url:
+            repo_url = url[:url.find('/resolve/')] if '/resolve/' in url else url
+            raise Exception(f"Access denied — accept the model's terms at {repo_url}")
         if response.status != 200:
             raise Exception(f"HTTP {response.status}")
 
@@ -540,6 +580,77 @@ async def cancel_download(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+@PromptServer.instance.routes.get("/server_download/hf_token_status")
+async def hf_token_status(request):
+    """Check if HF_TOKEN environment variable is set (without exposing the value)"""
+    has_token = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
+    return web.json_response({"has_token": has_token})
+
+
+@PromptServer.instance.routes.post("/server_download/validate_hf_token")
+async def validate_hf_token(request):
+    """Validate a Hugging Face token and optionally check access to specific model URLs"""
+    import aiohttp
+
+    try:
+        json_data = await request.json()
+        token = json_data.get("token", "")
+        urls = json_data.get("urls", [])  # Optional: list of model URLs to check access
+
+        # If token is the sentinel '__env__', use the environment variable
+        if token == "__env__":
+            token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or ""
+
+        if not token:
+            return web.json_response({"valid": False, "error": "No token provided"}, status=400)
+
+        # Validate token against HF API
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Check token validity via whoami endpoint
+            async with session.get(
+                "https://huggingface.co/api/whoami-v2",
+                headers={"Authorization": f"Bearer {token}"}
+            ) as response:
+                if response.status != 200:
+                    return web.json_response({"valid": False, "error": "Invalid token"})
+                user_data = await response.json()
+                username = user_data.get("name", "unknown")
+
+            # If URLs provided, check access to each
+            url_access = {}
+            for url in urls[:10]:  # Limit to 10 URLs
+                try:
+                    async with session.head(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        allow_redirects=True
+                    ) as resp:
+                        if resp.status == 200:
+                            url_access[url] = {"accessible": True}
+                        elif resp.status in (401, 403, 451):
+                            repo_url = url[:url.find('/resolve/')] if '/resolve/' in url else url
+                            url_access[url] = {
+                                "accessible": False,
+                                "reason": "terms_not_accepted",
+                                "repo_url": repo_url
+                            }
+                        else:
+                            url_access[url] = {"accessible": False, "reason": f"HTTP {resp.status}"}
+                except Exception:
+                    url_access[url] = {"accessible": False, "reason": "request_failed"}
+
+            return web.json_response({
+                "valid": True,
+                "username": username,
+                "url_access": url_access
+            })
+
+    except Exception as e:
+        logging.error(f"Error validating HF token: {e}")
+        return web.json_response({"valid": False, "error": str(e)}, status=500)
+
+
 @PromptServer.instance.routes.get("/extensions/ComfyUI-RunpodDirect/serverDownload.js")
 async def serve_js_with_version(request):
     """Serve JS file with cache-busting headers"""
@@ -559,7 +670,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
