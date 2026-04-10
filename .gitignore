@@ -1,0 +1,7 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+# RunpodDirect runtime settings (generated at runtime, user-specific)
+runpoddirect_settings.json
+runpoddirect_settings.json.tmp
