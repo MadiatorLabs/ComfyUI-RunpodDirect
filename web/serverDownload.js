@@ -1,6 +1,47 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+// Resolve the base URL for this extension dynamically so it works regardless of install directory name.
+function _resolveExtensionBase() {
+    try {
+        const scripts = document.querySelectorAll('script[src]');
+        for (const s of scripts) {
+            if (s.src && s.src.includes('serverDownload')) {
+                return s.src.replace(/\/[^/]+$/, '');
+            }
+        }
+    } catch (_e) {}
+    // Fallback: derive from import.meta.url if available
+    try {
+        if (typeof import.meta !== 'undefined' && import.meta.url) {
+            return import.meta.url.replace(/\/[^/]+$/, '');
+        }
+    } catch (_e) {}
+    return '/extensions/ComfyUI-ServerDirect';
+}
+const EXTENSION_BASE = _resolveExtensionBase();
+
+// Migrate localStorage keys from legacy runpoddirect_* prefix to serverdirect_*
+function _migrateLocalStorageKeys() {
+    const migrations = [
+        ['serverdirect_debug', 'serverdirect_debug'],
+        ['serverdirect_auto_check', 'serverdirect_auto_check'],
+        ['serverdirect_prequeue_guard', 'serverdirect_prequeue_guard'],
+        ['serverdirect_prequeue_hash_check', 'serverdirect_prequeue_hash_check'],
+    ];
+    try {
+        for (const [oldKey, newKey] of migrations) {
+            if (window?.localStorage?.getItem(newKey) == null) {
+                const oldVal = window?.localStorage?.getItem(oldKey);
+                if (oldVal != null) {
+                    window?.localStorage?.setItem(newKey, oldVal);
+                }
+            }
+        }
+    } catch (_e) {}
+}
+_migrateLocalStorageKeys();
+
 function getLocalFlag(key, defaultValue = false) {
     try {
         const raw = window?.localStorage?.getItem(key);
@@ -24,19 +65,19 @@ function setLocalFlag(key, enabled) {
 }
 
 function isVerboseLogsEnabled() {
-    return getLocalFlag('runpoddirect_debug', false);
+    return getLocalFlag('serverdirect_debug', false);
 }
 
 function isAutoMissingCheckEnabled() {
-    return getLocalFlag('runpoddirect_auto_check', true);
+    return getLocalFlag('serverdirect_auto_check', true);
 }
 
 function isPreQueueGuardEnabled() {
-    return getLocalFlag('runpoddirect_prequeue_guard', false);
+    return getLocalFlag('serverdirect_prequeue_guard', false);
 }
 
 function isStrictPreQueueHashCheckEnabled() {
-    return getLocalFlag('runpoddirect_prequeue_hash_check', false);
+    return getLocalFlag('serverdirect_prequeue_hash_check', false);
 }
 
 function debugLog(...args) {
@@ -44,9 +85,11 @@ function debugLog(...args) {
     console.log(...args);
 }
 
-// ComfyUI RunpodDirect Extension
-// Version: 1.0.10
-debugLog('[RunpodDirect] v1.0.10');
+// ComfyUI ServerDirect Extension — works on RunPod, Vast.ai, Lambda Labs, and any cloud GPU host
+// Version: 1.1.0
+// Always log on startup so users can confirm the extension JS was loaded (open DevTools → Console)
+console.log('[ServerDirect] v1.1.0 loaded — EXTENSION_BASE:', EXTENSION_BASE);
+debugLog('[ServerDirect] v1.1.0 (verbose mode active)');
 
 // Track download states
 const downloadStates = new Map();
@@ -254,9 +297,9 @@ function installRunpodHubStyles() {
     if (runpodHubStylesInstalled) return;
     runpodHubStylesInstalled = true;
     const style = document.createElement('style');
-    style.id = 'runpoddirect-hub-styles';
+    style.id = 'serverdirect-hub-styles';
     style.textContent = `
-        .runpoddirect-top-btn {
+        .serverdirect-top-btn {
             color: var(--base-foreground) !important;
             background-color: var(--secondary-background) !important;
             border: 1px solid var(--border-default) !important;
@@ -272,7 +315,7 @@ function installRunpodHubStyles() {
             line-height: 1 !important;
             box-sizing: border-box !important;
         }
-        .runpoddirect-top-btn::before {
+        .serverdirect-top-btn::before {
             content: "";
             display: block;
             width: 14px;
@@ -280,40 +323,40 @@ function installRunpodHubStyles() {
             flex: 0 0 14px;
             align-self: center;
             border-radius: 3px;
-            background-image: url("/extensions/ComfyUI-RunpodDirect/runpod-favicon.ico");
+            background-image: url("${EXTENSION_BASE}/icon.ico");
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
         }
-        .runpoddirect-top-btn .p-button-icon,
-        .runpoddirect-top-btn [class*="icon-"] {
+        .serverdirect-top-btn .p-button-icon,
+        .serverdirect-top-btn [class*="icon-"] {
             display: none !important;
             width: 0 !important;
             margin: 0 !important;
         }
-        .runpoddirect-top-btn .p-button-label {
+        .serverdirect-top-btn .p-button-label {
             margin: 0 !important;
             display: inline-flex !important;
             align-items: center !important;
             line-height: 1 !important;
         }
-        .runpoddirect-top-btn:hover {
+        .serverdirect-top-btn:hover {
             background-color: var(--secondary-background-hover) !important;
         }
-        .runpoddirect-top-btn.runpoddirect-active {
+        .serverdirect-top-btn.serverdirect-active {
             background-color: var(--primary-background) !important;
             border-color: var(--border-default) !important;
         }
-        .runpoddirect-hub-panel {
+        .serverdirect-hub-panel {
             backdrop-filter: blur(6px);
         }
-        .runpoddirect-hub-row:hover {
+        .serverdirect-hub-row:hover {
             background-color: var(--secondary-background-hover);
         }
-        .runpoddirect-hub-action-btn:hover {
+        .serverdirect-hub-action-btn:hover {
             filter: brightness(1.06);
         }
-        .runpoddirect-fallback-btn {
+        .serverdirect-fallback-btn {
             min-width: auto;
             min-height: 30px;
         }
@@ -366,7 +409,7 @@ api.addEventListener("server_download_complete", ({ detail }) => {
     invalidatePreQueueReportCache();
     if (isDownloadingAll) {
         completedDownloads++;
-        debugLog(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed`);
+        debugLog(`[ServerDirect] Progress: ${completedDownloads}/${totalDownloads} completed`);
     }
     downloadStates.set(download_id, { status: 'completed', progress: 100, path, size });
     window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
@@ -374,7 +417,7 @@ api.addEventListener("server_download_complete", ({ detail }) => {
     }));
     debugLog(`Download completed: ${download_id} -> ${path}`);
     if (isDownloadingAll && completedDownloads >= totalDownloads) {
-        debugLog('[RunpodDirect] All downloads completed!');
+        debugLog('[ServerDirect] All downloads completed!');
         isDownloadingAll = false;
         window.dispatchEvent(new CustomEvent('serverDownloadAllDone'));
     }
@@ -385,7 +428,7 @@ api.addEventListener("server_download_error", ({ detail }) => {
     invalidatePreQueueReportCache();
     if (isDownloadingAll) {
         completedDownloads++;
-        debugLog(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed (1 error)`);
+        debugLog(`[ServerDirect] Progress: ${completedDownloads}/${totalDownloads} completed (1 error)`);
     }
     downloadStates.set(download_id, { status: 'error', error });
     window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
@@ -393,7 +436,7 @@ api.addEventListener("server_download_error", ({ detail }) => {
     }));
     console.error(`Download error: ${download_id} - ${error}`);
     if (isDownloadingAll && completedDownloads >= totalDownloads) {
-        debugLog('[RunpodDirect] All downloads completed!');
+        debugLog('[ServerDirect] All downloads completed!');
         isDownloadingAll = false;
         window.dispatchEvent(new CustomEvent('serverDownloadAllDone'));
     }
@@ -491,14 +534,14 @@ async function cancelDownload(downloadId) {
 
 async function processDownloadQueue() {
     if (downloadQueue.length === 0) {
-        debugLog('[RunpodDirect] No downloads in queue');
+        debugLog('[ServerDirect] No downloads in queue');
         return;
     }
-    debugLog(`[RunpodDirect] Starting ${downloadQueue.length} downloads`);
+    debugLog(`[ServerDirect] Starting ${downloadQueue.length} downloads`);
     const downloadsToStart = [...downloadQueue];
     downloadQueue = [];
     for (const download of downloadsToStart) {
-        debugLog(`[RunpodDirect] Queuing download ${download.filename}`);
+        debugLog(`[ServerDirect] Queuing download ${download.filename}`);
         await startServerDownload(
             download.url,
             download.directory,
@@ -508,7 +551,7 @@ async function processDownloadQueue() {
             download.hash_type || null
         );
     }
-    debugLog(`[RunpodDirect] All ${downloadsToStart.length} downloads queued on backend`);
+    debugLog(`[ServerDirect] All ${downloadsToStart.length} downloads queued on backend`);
 }
 
 function getRunpodHubQueueEntries() {
@@ -534,23 +577,74 @@ function getRunpodHubQueueEntries() {
 }
 
 function setRunpodHubButtonActive(active) {
-    const actionBtn = document.querySelector('.runpoddirect-top-btn');
+    const actionBtn = document.querySelector('.serverdirect-top-btn');
     if (!(actionBtn instanceof HTMLElement)) return;
-    actionBtn.classList.toggle('runpoddirect-active', !!active);
+    actionBtn.classList.toggle('serverdirect-active', !!active);
 }
 
 function ensureRunpodTopBarButton() {
-    if (document.querySelector('.runpoddirect-top-btn')) return true;
-    const group = document.querySelector('.comfyui-button-group');
-    if (!(group instanceof HTMLElement)) return false;
+    if (document.querySelector('.serverdirect-top-btn')) return true;
+
+    // Try multiple toolbar selectors across different ComfyUI versions / themes.
+    // ComfyUI 0.2x (Vue/PrimeVue): uses .comfyui-menu, .comfyui-menu-right
+    // Older ComfyUI: uses .comfyui-button-group
+    const TOOLBAR_SELECTORS = [
+        '.comfyui-menu-right',        // ComfyUI 0.20+ right side of top bar
+        '.comfyui-menu',              // ComfyUI 0.20+ menu bar
+        '.comfyui-button-group',      // older ComfyUI
+        '.p-toolbar-end',             // PrimeVue toolbar end slot
+        '.p-toolbar',                 // PrimeVue toolbar fallback
+    ];
+
+    let anchor = null;
+    for (const sel of TOOLBAR_SELECTORS) {
+        const el = document.querySelector(sel);
+        if (el instanceof HTMLElement) { anchor = el; break; }
+    }
+
+    if (anchor) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'comfyui-button serverdirect-top-btn serverdirect-fallback-btn';
+        btn.textContent = 'ServerDirect';
+        btn.title = 'ServerDirect – direct model downloads';
+        btn.onclick = () => toggleRunpodHubPanel();
+        anchor.appendChild(btn);
+        console.log('[ServerDirect] Fallback toolbar button injected into', anchor.className);
+        return true;
+    }
+
+    // Last resort: fixed floating button that works on ANY ComfyUI version/theme.
+    // Only created once; removed automatically when a proper button later appears.
+    _ensureFloatingFallbackButton();
+    return false; // still return false so the caller keeps retrying toolbar injection
+}
+
+function _ensureFloatingFallbackButton() {
+    const FLOAT_ID = 'serverdirect-float-btn';
+    if (document.getElementById(FLOAT_ID)) return;
     const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'comfyui-button runpoddirect-top-btn runpoddirect-fallback-btn';
-    btn.textContent = 'RunpodDirect';
-    btn.title = 'RunpodDirect downloads and settings';
+    btn.id = FLOAT_ID;
+    btn.textContent = '⬇ ServerDirect';
+    btn.title = 'ServerDirect – direct model downloads';
+    Object.assign(btn.style, {
+        position:   'fixed',
+        bottom:     '16px',
+        right:      '16px',
+        zIndex:     '99999',
+        padding:    '8px 14px',
+        background: '#2563eb',
+        color:      '#fff',
+        border:     'none',
+        borderRadius: '6px',
+        fontWeight: '600',
+        fontSize:   '13px',
+        cursor:     'pointer',
+        boxShadow:  '0 2px 8px rgba(0,0,0,0.35)',
+    });
     btn.onclick = () => toggleRunpodHubPanel();
-    group.appendChild(btn);
-    return true;
+    document.body.appendChild(btn);
+    console.log('[ServerDirect] No toolbar anchor found — floating fallback button added (bottom-right corner)');
 }
 
 function getRunpodHubFilename(downloadId) {
@@ -594,7 +688,7 @@ function positionRunpodHubPanel() {
     let left = Math.max(margin, window.innerWidth - width - margin);
     let top = topDefault;
 
-    const actionBtn = document.querySelector('.runpoddirect-top-btn');
+    const actionBtn = document.querySelector('.serverdirect-top-btn');
     if (actionBtn instanceof HTMLElement) {
         const rect = actionBtn.getBoundingClientRect();
         left = Math.min(
@@ -639,7 +733,7 @@ function renderRunpodHubQueue() {
             flexDirection: 'column',
             gap: '6px',
         });
-        row.className = 'runpoddirect-hub-row';
+        row.className = 'serverdirect-hub-row';
 
         const top = createEl('div', {
             display: 'flex',
@@ -730,7 +824,7 @@ function renderRunpodHubQueue() {
                 fontSize: '0.6875rem',
                 cursor: 'pointer',
             }, label);
-            btn.className = 'runpoddirect-hub-action-btn';
+            btn.className = 'serverdirect-hub-action-btn';
             btn.type = 'button';
             btn.onmouseenter = () => {
                 btn.style.backgroundColor = variant === 'secondary' ? THEME.secondaryBgHover : THEME.primaryHover;
@@ -839,7 +933,7 @@ async function openRunpodHubPanel() {
         display: 'flex',
         flexDirection: 'column',
     });
-    runpodHubPanelEl.className = 'runpoddirect-hub-panel';
+    runpodHubPanelEl.className = 'serverdirect-hub-panel';
     runpodHubPanelEl.setAttribute('role', 'dialog');
     runpodHubPanelEl.onclick = (e) => e.stopPropagation();
 
@@ -854,7 +948,7 @@ async function openRunpodHubPanel() {
     header.appendChild(createEl('div', {
         fontSize: '0.875rem',
         fontWeight: '600',
-    }, 'RunpodDirect'));
+    }, 'ServerDirect'));
     const closeBtn = createEl('button', {
         width: '24px',
         height: '24px',
@@ -865,7 +959,7 @@ async function openRunpodHubPanel() {
         cursor: 'pointer',
     }, '×');
     closeBtn.type = 'button';
-    closeBtn.setAttribute('aria-label', 'Close RunpodDirect panel');
+    closeBtn.setAttribute('aria-label', 'Close ServerDirect panel');
     closeBtn.onmouseenter = () => { closeBtn.style.backgroundColor = THEME.secondaryBgHover; };
     closeBtn.onmouseleave = () => { closeBtn.style.backgroundColor = 'transparent'; };
     closeBtn.onclick = () => closeRunpodHubPanel();
@@ -946,16 +1040,16 @@ async function openRunpodHubPanel() {
 
     settings.appendChild(makeCheckboxRow(
         'Verbose debug logs',
-        'Show detailed RunpodDirect logs in browser console.',
+        'Show detailed ServerDirect logs in browser console.',
         () => isVerboseLogsEnabled(),
-        (enabled) => setLocalFlag('runpoddirect_debug', enabled),
+        (enabled) => setLocalFlag('serverdirect_debug', enabled),
     ));
 
     settings.appendChild(makeCheckboxRow(
         'Auto missing-model checks',
         'Re-check workflow models on graph load and when tab regains focus.',
         () => isAutoMissingCheckEnabled(),
-        (enabled) => setLocalFlag('runpoddirect_auto_check', enabled),
+        (enabled) => setLocalFlag('serverdirect_auto_check', enabled),
     ));
 
     settings.appendChild(makeCheckboxRow(
@@ -963,7 +1057,7 @@ async function openRunpodHubPanel() {
         'Intercept Run and block queueing when required models appear to be missing.',
         () => isPreQueueGuardEnabled(),
         (enabled) => {
-            setLocalFlag('runpoddirect_prequeue_guard', enabled);
+            setLocalFlag('serverdirect_prequeue_guard', enabled);
             invalidatePreQueueReportCache();
             syncPreQueueGuard();
             return true;
@@ -975,7 +1069,7 @@ async function openRunpodHubPanel() {
         'Re-hash matching files before queueing. Safer for corruption checks, slower on large models.',
         () => isStrictPreQueueHashCheckEnabled(),
         (enabled) => {
-            setLocalFlag('runpoddirect_prequeue_hash_check', enabled);
+            setLocalFlag('serverdirect_prequeue_hash_check', enabled);
             invalidatePreQueueReportCache();
             return true;
         },
@@ -990,7 +1084,7 @@ async function openRunpodHubPanel() {
             const ok = await setServerWsKeepaliveSetting(enabled);
             if (checkbox) checkbox.disabled = false;
             if (!ok) {
-                debugLog('[RunpodDirect] Failed to update keepalive setting');
+                debugLog('[ServerDirect] Failed to update keepalive setting');
                 return false;
             }
             return true;
@@ -1006,7 +1100,7 @@ async function openRunpodHubPanel() {
             const ok = await setServerCgroupRamPatchSetting(enabled);
             if (checkbox) checkbox.disabled = false;
             if (!ok) {
-                debugLog('[RunpodDirect] Failed to update cgroup RAM-aware setting');
+                debugLog('[ServerDirect] Failed to update cgroup RAM-aware setting');
                 return false;
             }
             return true;
@@ -1113,7 +1207,7 @@ async function openRunpodHubPanel() {
         const target = event.target;
         if (!(target instanceof Node)) return;
         if (runpodHubPanelEl.contains(target)) return;
-        const actionBtn = document.querySelector('.runpoddirect-top-btn');
+        const actionBtn = document.querySelector('.serverdirect-top-btn');
         if (actionBtn instanceof HTMLElement && actionBtn.contains(target)) return;
         closeRunpodHubPanel();
     };
@@ -1352,7 +1446,7 @@ async function waitForNativeMissingDialog(timeoutMs = 4200, pollMs = 120) {
 
 async function maybeAutoShowMissingModelsModal(reason = 'auto') {
     if (!isAutoMissingCheckEnabled()) return null;
-    debugLog(`[RunpodDirect] Auto-check (${reason}): skipped (auto fallback modal disabled)`);
+    debugLog(`[ServerDirect] Auto-check (${reason}): skipped (auto fallback modal disabled)`);
     return null;
 }
 
@@ -1416,10 +1510,10 @@ function extractModelsFromPinia() {
     if (!dialogState) return null;
     const { missingModels, paths } = dialogState;
     if (!missingModels.length) {
-        debugLog('[RunpodDirect] No missingModels in dialog contentProps');
+        debugLog('[ServerDirect] No missingModels in dialog contentProps');
         return null;
     }
-    debugLog(`[RunpodDirect] Found ${missingModels.length} models from Pinia dialog store`);
+    debugLog(`[ServerDirect] Found ${missingModels.length} models from Pinia dialog store`);
     return {
         models: missingModels.map((m) => ({
             filename: sanitizeFilename(m.name),
@@ -1533,7 +1627,7 @@ function getCurrentWorkflowData(options = {}) {
             return data;
         }
     } catch (e) {
-        debugLog('[RunpodDirect] Failed to access current workflow data', e);
+        debugLog('[ServerDirect] Failed to access current workflow data', e);
     }
     return null;
 }
@@ -2709,7 +2803,7 @@ async function checkMissingModelsForCandidatesFallback(candidates, folderPaths, 
         if (exists === false) {
             const anywhere = await modelExistsAnywhere(model.filename, folderPaths, [model.directory]);
             if (anywhere?.exists === true) {
-                debugLog(`[RunpodDirect] Found ${model.filename} in ${anywhere.directory}, ignoring initial miss in ${model.directory}`);
+                debugLog(`[ServerDirect] Found ${model.filename} in ${anywhere.directory}, ignoring initial miss in ${model.directory}`);
                 continue;
             }
             if (anywhere?.exists === null) {
@@ -2767,7 +2861,7 @@ async function checkMissingModelsBeforeQueue(options = {}) {
     const { missing, unresolved, candidates } = await checkMissingModelsForWorkflow(workflow, piniaPaths, options);
 
     debugLog(
-        `[RunpodDirect] Pre-queue check: ${candidates.length} candidates, ${missing.length} missing, ${unresolved.length} unresolved`
+        `[ServerDirect] Pre-queue check: ${candidates.length} candidates, ${missing.length} missing, ${unresolved.length} unresolved`
     );
 
     return { missing, unresolved, candidates };
@@ -2976,7 +3070,7 @@ function showPreQueueMissingModal(report, onQueueAnyway, options = {}) {
             borderRadius: '0.5rem',
             cursor: 'pointer',
             fontWeight: '600',
-        }, 'Open RunpodDirect');
+        }, 'Open ServerDirect');
         openHubBtn.type = 'button';
         openHubBtn.onclick = () => {
             closePreQueueMissingModal();
@@ -3015,7 +3109,7 @@ function syncPreQueueGuard(retryCount = 0) {
     if (!isPreQueueGuardEnabled()) {
         if (queueGuardInstalled && app?.queuePrompt === queueGuardWrappedPrompt && typeof queueGuardOriginalPrompt === 'function') {
             app.queuePrompt = queueGuardOriginalPrompt;
-            debugLog('[RunpodDirect] Pre-queue model check guard removed');
+            debugLog('[ServerDirect] Pre-queue model check guard removed');
         }
         queueGuardInstalled = false;
         queueGuardWrappedPrompt = null;
@@ -3032,7 +3126,7 @@ function syncPreQueueGuard(retryCount = 0) {
         if (retryCount < 20) {
             setTimeout(() => syncPreQueueGuard(retryCount + 1), 500);
         } else {
-            debugLog('[RunpodDirect] queuePrompt hook not available, pre-queue guard not installed');
+            debugLog('[ServerDirect] queuePrompt hook not available, pre-queue guard not installed');
         }
         return;
     }
@@ -3055,7 +3149,7 @@ function syncPreQueueGuard(retryCount = 0) {
             });
             if (report.missing.length > 0 || report.unresolved.length > 0) {
                 debugLog(
-                    `[RunpodDirect] Blocking queue: ${report.missing.length} missing, ${report.unresolved.length} unresolved model(s)`
+                    `[ServerDirect] Blocking queue: ${report.missing.length} missing, ${report.unresolved.length} unresolved model(s)`
                 );
                 showPreQueueMissingModal(report, async () => {
                     queueGuardBypassOnce = true;
@@ -3064,7 +3158,7 @@ function syncPreQueueGuard(retryCount = 0) {
                 return false;
             }
         } catch (error) {
-            console.error('[RunpodDirect] Pre-queue model check failed, allowing queue', error);
+            console.error('[ServerDirect] Pre-queue model check failed, allowing queue', error);
         }
 
         closePreQueueMissingModal();
@@ -3075,7 +3169,7 @@ function syncPreQueueGuard(retryCount = 0) {
 
     app.queuePrompt = queueGuardWrappedPrompt;
     queueGuardInstalled = true;
-    debugLog('[RunpodDirect] Pre-queue model check guard installed');
+    debugLog('[ServerDirect] Pre-queue model check guard installed');
 }
 
 // Check if HF_TOKEN env var is set on the backend
@@ -3784,27 +3878,27 @@ window.serverDownload = {
 // --- Main injection logic ---
 
 async function injectServerDownloadButtons() {
-    debugLog('[RunpodDirect] injectServerDownloadButtons called');
+    debugLog('[ServerDirect] injectServerDownloadButtons called');
     let dialogForLock = null;
     try {
 
         const container = findMissingModelsContainer();
         if (!container) {
-            debugLog('[RunpodDirect] Missing models container not found');
+            debugLog('[ServerDirect] Missing models container not found');
             return;
         }
 
-        debugLog('[RunpodDirect] Found missing models container');
+        debugLog('[ServerDirect] Found missing models container');
         dialogForLock = container.closest('[role="dialog"]');
         if (dialogForLock?.dataset?.serverDownloadInjecting === '1') {
-            debugLog('[RunpodDirect] Injection already in progress for this dialog');
+            debugLog('[ServerDirect] Injection already in progress for this dialog');
             return;
         }
         if (dialogForLock) {
             dialogForLock.dataset.serverDownloadInjecting = '1';
         }
         if (dialogForLock?.querySelector('.server-download-all-btn') || document.querySelector('.server-download-all-btn')) {
-            debugLog('[RunpodDirect] Buttons already injected');
+            debugLog('[ServerDirect] Buttons already injected');
             return;
         }
 
@@ -3825,7 +3919,7 @@ async function injectServerDownloadButtons() {
             const domModels = extractModelsFromDOM(container);
             if (domModels && domModels.length > 0) {
                 models = domModels;
-                debugLog(`[RunpodDirect] Got ${models.length} models from DOM parsing`);
+                debugLog(`[ServerDirect] Got ${models.length} models from DOM parsing`);
             }
         }
 
@@ -3834,18 +3928,18 @@ async function injectServerDownloadButtons() {
             const footerData = extractModelsFromFooter();
             if (footerData && footerData.models?.length > 0) {
                 models = footerData.models;
-                debugLog(`[RunpodDirect] Got ${models.length} models from footer component`);
+                debugLog(`[ServerDirect] Got ${models.length} models from footer component`);
             }
         }
 
         if (!models || models.length === 0) {
-            debugLog('[RunpodDirect] No models could be extracted, will retry...');
+            debugLog('[ServerDirect] No models could be extracted, will retry...');
             // Retry after a short delay - Pinia store may not be populated yet
             if (!container.dataset.retryCount || parseInt(container.dataset.retryCount) < 5) {
                 container.dataset.retryCount = (parseInt(container.dataset.retryCount || '0') + 1).toString();
                 setTimeout(() => injectServerDownloadButtons(), 500);
             } else {
-                debugLog('[RunpodDirect] Max retries reached, giving up');
+                debugLog('[ServerDirect] Max retries reached, giving up');
             }
             return;
         }
@@ -3855,19 +3949,19 @@ async function injectServerDownloadButtons() {
     // Additional model detection from workflow (widget selections + embedded URLs)
         const workflowModels = await collectSmartWorkflowModels(models, folderPaths);
         if (workflowModels.length > 0) {
-            debugLog(`[RunpodDirect] Found ${workflowModels.length} additional model(s) from workflow scan`);
+            debugLog(`[ServerDirect] Found ${workflowModels.length} additional model(s) from workflow scan`);
         }
 
         models = mergeAndNormalizeModels(models, workflowModels, folderPaths);
 
         if (!models.length) {
-            debugLog('[RunpodDirect] No valid downloadable models after normalization');
+            debugLog('[ServerDirect] No valid downloadable models after normalization');
             return;
         }
 
         const addedToDialog = augmentDialogMissingModels(models, folderPaths);
         if (addedToDialog > 0) {
-            debugLog(`[RunpodDirect] Added ${addedToDialog} model(s) to visible missing-models list`);
+            debugLog(`[ServerDirect] Added ${addedToDialog} model(s) to visible missing-models list`);
             // Let Vue flush the dialog list update before row-based DOM operations below.
             await new Promise((resolve) => setTimeout(resolve, 80));
         }
@@ -3882,10 +3976,10 @@ async function injectServerDownloadButtons() {
         const gatedWithUrls = models.filter(m => gatedFilenames.has(m.filename.toLowerCase()));
 
         downloadableModels.forEach((m, i) => {
-            debugLog(`[RunpodDirect] Model ${i + 1}: ${m.directory}/${m.filename} -> ${m.url}`);
+            debugLog(`[ServerDirect] Model ${i + 1}: ${m.directory}/${m.filename} -> ${m.url}`);
         });
         if (gatedWithUrls.length > 0) {
-            debugLog(`[RunpodDirect] ${gatedWithUrls.length} gated model(s) detected`);
+            debugLog(`[ServerDirect] ${gatedWithUrls.length} gated model(s) detected`);
         }
 
         const selectedFolders = new Map();
@@ -3946,19 +4040,19 @@ async function injectServerDownloadButtons() {
                     // All gated models verified — enable download for everything
                     gatedVerified = true;
                     updateBtnCount();
-                    debugLog(`[RunpodDirect] All gated models accessible, ${allModelsToDownload.length} total`);
+                    debugLog(`[ServerDirect] All gated models accessible, ${allModelsToDownload.length} total`);
                 },
                 onPartialAccess(_accessible, denied) {
                     // Some models need terms — keep button disabled
                     gatedVerified = false;
                     updateBtnCount();
-                    debugLog(`[RunpodDirect] ${denied.length} model(s) need terms accepted`);
+                    debugLog(`[ServerDirect] ${denied.length} model(s) need terms accepted`);
                 },
                 onFail() {
                     // Invalid token — keep button disabled
                     gatedVerified = false;
                     updateBtnCount();
-                    debugLog('[RunpodDirect] Token validation failed');
+                    debugLog('[ServerDirect] Token validation failed');
                 },
             });
         }
@@ -4059,7 +4153,7 @@ async function injectServerDownloadButtons() {
         });
 
         if (dialog?.querySelector('.server-download-all-btn')) {
-            debugLog('[RunpodDirect] Button already present before insert, skipping duplicate');
+            debugLog('[ServerDirect] Button already present before insert, skipping duplicate');
             return;
         }
         if (footerBtnRow) {
@@ -4076,10 +4170,10 @@ async function injectServerDownloadButtons() {
             container.parentElement.insertBefore(fallbackContainer, container);
         }
 
-        debugLog('[RunpodDirect] Button injection complete');
+        debugLog('[ServerDirect] Button injection complete');
         setTimeout(() => { void hydrateDialogModelSizes(container, models); }, 350);
     } catch (error) {
-        console.error('[RunpodDirect] Injection failed', error);
+        console.error('[ServerDirect] Injection failed', error);
     } finally {
         if (dialogForLock?.dataset) {
             delete dialogForLock.dataset.serverDownloadInjecting;
@@ -4089,7 +4183,7 @@ async function injectServerDownloadButtons() {
 
 // MutationObserver for detecting the missing models dialog
 function setupDialogObserver() {
-    debugLog('[RunpodDirect] Setting up dialog observer');
+    debugLog('[ServerDirect] Setting up dialog observer');
 
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
@@ -4108,10 +4202,10 @@ function setupDialogObserver() {
                             if (dialog) {
                                 const text = dialog.textContent || '';
                                 if (text.includes('missing models') || text.includes('Missing models')) {
-                                    debugLog('[RunpodDirect] Detected missing models dialog');
+                                    debugLog('[ServerDirect] Detected missing models dialog');
                                     const fromCustomOverlay = !!dialog.closest('.server-download-prequeue-overlay');
                                     if (!fromCustomOverlay && document.querySelector('.server-download-prequeue-overlay')) {
-                                        debugLog('[RunpodDirect] Closing custom missing-model dialog because native dialog is now visible');
+                                        debugLog('[ServerDirect] Closing custom missing-model dialog because native dialog is now visible');
                                         closePreQueueMissingModal();
                                     }
                                     setTimeout(() => injectServerDownloadButtons(), 500);
@@ -4125,17 +4219,17 @@ function setupDialogObserver() {
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
-    debugLog('[RunpodDirect] Observer active');
+    debugLog('[ServerDirect] Observer active');
 }
 
 // Register extension
 app.registerExtension({
-    name: "ComfyUI.RunpodDirect",
+    name: "ComfyUI.ServerDirect",
     actionBarButtons: [
         {
-            label: 'RunpodDirect',
-            tooltip: 'RunpodDirect downloads and settings',
-            class: 'runpoddirect-top-btn',
+            label: 'ServerDirect',
+            tooltip: 'ServerDirect – direct model downloads',
+            class: 'serverdirect-top-btn',
             onClick: () => {
                 toggleRunpodHubPanel();
             },
@@ -4143,37 +4237,51 @@ app.registerExtension({
     ],
 
     async setup() {
-        debugLog("[RunpodDirect] Extension setup starting");
-        checkEnvHfToken();
-        syncPreQueueGuard();
-        setupDialogObserver();
-        installAutoMissingCheckListeners();
-        installRunpodHubListeners();
-        installRunpodHubStyles();
+        console.log("[ServerDirect] Extension setup() called");
+        try { checkEnvHfToken(); } catch(e) { console.warn('[ServerDirect] checkEnvHfToken failed', e); }
+        try { syncPreQueueGuard(); } catch(e) { console.warn('[ServerDirect] syncPreQueueGuard failed', e); }
+        try { setupDialogObserver(); } catch(e) { console.warn('[ServerDirect] setupDialogObserver failed', e); }
+        try { installAutoMissingCheckListeners(); } catch(e) { console.warn('[ServerDirect] installAutoMissingCheckListeners failed', e); }
+        try { installRunpodHubListeners(); } catch(e) { console.warn('[ServerDirect] installRunpodHubListeners failed', e); }
+        try { installRunpodHubStyles(); } catch(e) { console.warn('[ServerDirect] installRunpodHubStyles failed', e); }
         void refreshDownloadStatesFromBackend();
         setTimeout(() => {
-            if (document.querySelector('.runpoddirect-top-btn')) return;
+            if (document.querySelector('.serverdirect-top-btn')) {
+                console.log('[ServerDirect] Toolbar button present (registered via actionBarButtons)');
+                return;
+            }
+            console.log('[ServerDirect] actionBarButtons button not found — starting fallback injection');
             let attempts = 0;
             const timer = setInterval(() => {
                 attempts += 1;
-                if (ensureRunpodTopBarButton() || attempts >= 20) {
+                const toolbarFound = ensureRunpodTopBarButton();
+                // If a real toolbar button appeared (from a later actionBarButtons render),
+                // remove the floating fallback to avoid duplicates.
+                const floatBtn = document.getElementById('serverdirect-float-btn');
+                if (floatBtn && document.querySelector('.comfyui-menu .serverdirect-top-btn, .comfyui-button-group .serverdirect-top-btn')) {
+                    floatBtn.remove();
+                }
+                if (toolbarFound || attempts >= 30) {
                     clearInterval(timer);
+                    if (!toolbarFound && attempts >= 30) {
+                        console.warn('[ServerDirect] No toolbar anchor found — using floating button (bottom-right corner)');
+                    }
                 }
             }, 300);
-        }, 1200);
+        }, 1500);
         scheduleAutoMissingModelsCheck('setup-initial', 1200);
 
         setTimeout(() => {
-            debugLog('[RunpodDirect] Checking for existing dialog...');
+            debugLog('[ServerDirect] Checking for existing dialog...');
             injectServerDownloadButtons();
         }, 1000);
 
         setTimeout(() => {
-            debugLog('[RunpodDirect] Second check for dialog...');
+            debugLog('[ServerDirect] Second check for dialog...');
             injectServerDownloadButtons();
         }, 3000);
 
-        debugLog("[RunpodDirect] Extension setup complete");
+        console.log("[ServerDirect] Extension setup() complete");
     },
 
     async beforeConfigureGraph(graphData) {
@@ -4191,22 +4299,22 @@ app.registerExtension({
             const added = seedWorkflowModelsForNativeMissingDialog(graphData, { missing: seedable });
             if (added > 0) {
                 debugLog(
-                    `[RunpodDirect] beforeConfigureGraph: seeded ${added} model(s) into workflow.models ` +
+                    `[ServerDirect] beforeConfigureGraph: seeded ${added} model(s) into workflow.models ` +
                     `for native missing-models dialog (fast path, candidates=${candidates.length})`
                 );
             } else {
                 debugLog(
-                    `[RunpodDirect] beforeConfigureGraph: no additional native-model entries (fast path, candidates=${candidates.length})`
+                    `[ServerDirect] beforeConfigureGraph: no additional native-model entries (fast path, candidates=${candidates.length})`
                 );
             }
         } catch (error) {
-            console.error('[RunpodDirect] beforeConfigureGraph native seeding failed', error);
+            console.error('[ServerDirect] beforeConfigureGraph native seeding failed', error);
         }
     },
 
     async afterConfigureGraph(missingNodeTypes) {
         const missingCount = Array.isArray(missingNodeTypes) ? missingNodeTypes.length : 0;
-        debugLog(`[RunpodDirect] afterConfigureGraph fired (missing node types: ${missingCount})`);
+        debugLog(`[ServerDirect] afterConfigureGraph fired (missing node types: ${missingCount})`);
         scheduleAutoMissingModelsCheck('afterConfigureGraph', 320);
         setTimeout(() => { void maybeAutoShowMissingModelsModal('afterConfigureGraph-late'); }, 1400);
     }

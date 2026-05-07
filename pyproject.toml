@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-runpoddirect"
-description = "Server-side model download extension for ComfyUI on Runpod - Download missing models directly to your pod with multi-connection downloads, queue management, and real-time progress tracking"
-version = "1.0.7"
+description = "Server-side model download extension for ComfyUI - Download missing models directly to your cloud GPU instance with multi-connection downloads, queue management, and real-time progress tracking. Works on RunPod, Vast.ai, Lambda Labs, and any cloud GPU host."
+version = "1.1.0"
 license = {file = "LICENSE"}
 authors = [
     {name = "Madiator2011"},

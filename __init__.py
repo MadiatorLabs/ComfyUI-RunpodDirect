@@ -1,6 +1,7 @@
 """
-ComfyUI RunpodDirect - Direct Model Downloads for RunPod
-Download models directly to your RunPod instance with multi-connection support
+ComfyUI ServerDirect - Direct Model Downloads for Cloud GPU Hosts
+Download models directly to your instance with multi-connection support.
+Works on RunPod, Vast.ai, Lambda Labs, and any other cloud GPU provider.
 """
 
 import os
@@ -23,7 +24,7 @@ download_control = {}
 download_queue = []
 current_download_task = None  # Only one download at a time
 
-# Configuration optimized for datacenter connections (Runpod)
+# Configuration optimized for datacenter connections
 CHUNK_SIZE = 32 * 1024 * 1024  # 32MB chunks - balanced for 500MB to 30GB+ files
 NUM_CONNECTIONS = 8  # 8 parallel connections - optimal for DC bandwidth
 CHUNK_MAX_RETRIES = 4
@@ -32,7 +33,11 @@ SOCK_CONNECT_TIMEOUT = 30
 SOCK_READ_TIMEOUT = 120
 HASH_READ_CHUNK_SIZE = 8 * 1024 * 1024
 WS_KEEPALIVE_INTERVAL_SECONDS = 45
-SETTINGS_FILENAME = "runpoddirect_settings.json"
+SETTINGS_FILENAME = "serverdirect_settings.json"
+_LEGACY_SETTINGS_FILENAME = "runpoddirect_settings.json"
+
+# Dynamically resolve the directory name so routes work regardless of install directory
+_EXTENSION_DIR_NAME = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
 PREQUEUE_CHECK_MAX_MODELS = 512
 
 _ws_keepalive_task = None
@@ -139,10 +144,15 @@ def _patch_comfy_ram_detection_for_cgroups():
     if _cgroup_ram_patch_applied:
         return
 
-    env_disabled = _parse_bool(os.environ.get("RPD_DISABLE_CGROUP_RAM_PATCH"), default=False)
+    # Accept both the generic SD_ prefix and the legacy RPD_ prefix
+    _env_disable_val = (
+        os.environ.get("SD_DISABLE_CGROUP_RAM_PATCH")
+        or os.environ.get("RPD_DISABLE_CGROUP_RAM_PATCH")
+    )
+    env_disabled = _parse_bool(_env_disable_val, default=False)
     if env_disabled:
         _cgroup_ram_patch_enabled = False
-        logging.info("[RunpodDirect] Cgroup RAM patch disabled via RPD_DISABLE_CGROUP_RAM_PATCH")
+        logging.info("[ServerDirect] Cgroup RAM patch disabled via SD_DISABLE_CGROUP_RAM_PATCH")
         return
 
     try:
@@ -180,11 +190,11 @@ def _patch_comfy_ram_detection_for_cgroups():
         host_gib = host_total / (1024 ** 3)
         avail_gib = min(host_available, max(limit - usage, 0)) / (1024 ** 3)
         logging.info(
-            f"[RunpodDirect] Cgroup RAM patch enabled: host={host_gib:.2f} GiB, "
+            f"[ServerDirect] Cgroup RAM patch enabled: host={host_gib:.2f} GiB, "
             f"limit={limit_gib:.2f} GiB, available={avail_gib:.2f} GiB"
         )
     except Exception as e:
-        logging.warning(f"[RunpodDirect] Failed to apply cgroup RAM patch: {e}")
+        logging.warning(f"[ServerDirect] Failed to apply cgroup RAM patch: {e}")
 
 
 def _settings_file_path():
@@ -210,7 +220,7 @@ def _persist_runtime_settings():
             os.replace(temp_path, settings_path)
         return True
     except Exception as e:
-        logging.warning(f"[RunpodDirect] Failed to persist settings: {e}")
+        logging.warning(f"[ServerDirect] Failed to persist settings: {e}")
         try:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -224,6 +234,17 @@ def _load_persisted_settings():
     global _cgroup_ram_patch_enabled
 
     settings_path = _settings_file_path()
+
+    # Migrate from legacy filename if the new one doesn't exist yet
+    if not os.path.exists(settings_path):
+        legacy_path = os.path.join(os.path.dirname(__file__), _LEGACY_SETTINGS_FILENAME)
+        if os.path.exists(legacy_path):
+            try:
+                os.rename(legacy_path, settings_path)
+                logging.info(f"[ServerDirect] Migrated settings from {_LEGACY_SETTINGS_FILENAME}")
+            except Exception:
+                settings_path = legacy_path  # fall back to reading from the old path
+
     if not os.path.exists(settings_path):
         return
 
@@ -236,8 +257,11 @@ def _load_persisted_settings():
         if "keepalive_enabled" in data:
             _ws_keepalive_enabled = _parse_bool(data.get("keepalive_enabled"), default=True)
 
+        # Accept both the generic SD_ prefix and the legacy RPD_ prefix
         cgroup_locked_by_env = _parse_bool(
-            os.environ.get("RPD_DISABLE_CGROUP_RAM_PATCH"), default=False
+            os.environ.get("SD_DISABLE_CGROUP_RAM_PATCH")
+            or os.environ.get("RPD_DISABLE_CGROUP_RAM_PATCH"),
+            default=False
         )
         if cgroup_locked_by_env:
             _cgroup_ram_patch_enabled = False
@@ -248,12 +272,12 @@ def _load_persisted_settings():
             )
 
         logging.info(
-            "[RunpodDirect] Loaded settings: "
+            "[ServerDirect] Loaded settings: "
             f"keepalive={_ws_keepalive_enabled}, "
             f"cgroup_ram_patch={_cgroup_ram_patch_enabled}"
         )
     except Exception as e:
-        logging.warning(f"[RunpodDirect] Failed to load settings: {e}")
+        logging.warning(f"[ServerDirect] Failed to load settings: {e}")
 
 
 def _normalize_expected_hash(expected_hash):
@@ -298,7 +322,7 @@ def _cleanup_partial_file(path):
         if path and os.path.exists(path):
             os.remove(path)
     except Exception as e:
-        logging.warning(f"[RunpodDirect] Failed to remove partial file {path}: {e}")
+        logging.warning(f"[ServerDirect] Failed to remove partial file {path}: {e}")
 
 
 def _sanitize_simple_filename(filename):
@@ -489,7 +513,7 @@ async def start_download(request):
                 status=400
             )
 
-        temp_output_path = f"{output_path}.runpoddirect.part"
+        temp_output_path = f"{output_path}.serverdirect.part"
 
         # If a previous session crashed mid-download, remove stale temp file and start clean.
         if os.path.exists(temp_output_path):
@@ -503,7 +527,7 @@ async def start_download(request):
                 actual_hash = _compute_file_hash(output_path, hash_type)
                 if actual_hash.lower() != expected_hash.lower():
                     logging.warning(
-                        f"[RunpodDirect] Existing file hash mismatch for {output_path}; removing and redownloading"
+                        f"[ServerDirect] Existing file hash mismatch for {output_path}; removing and redownloading"
                     )
                     _cleanup_partial_file(output_path)
                 else:
@@ -572,11 +596,11 @@ async def process_download_queue():
 
     # Check if already downloading
     if current_download_task is not None and not current_download_task.done():
-        logging.info("[RunpodDirect] Download already in progress, waiting...")
+        logging.info("[ServerDirect] Download already in progress, waiting...")
         return  # Already downloading
 
     if len(download_queue) == 0:
-        logging.info("[RunpodDirect] Queue is empty")
+        logging.info("[ServerDirect] Queue is empty")
         return  # Nothing to process
 
     # Get next download from queue
@@ -594,7 +618,7 @@ async def process_download_queue():
     active_downloads[download_id]["progress"] = 0
     active_downloads[download_id]["downloaded"] = 0
 
-    logging.info(f"[RunpodDirect] Starting download {download_id} with {NUM_CONNECTIONS} connections (full speed)")
+    logging.info(f"[ServerDirect] Starting download {download_id} with {NUM_CONNECTIONS} connections (full speed)")
 
     # Notify frontend that download is starting
     await PromptServer.instance.send("server_download_progress", {
@@ -626,7 +650,7 @@ def on_download_complete(download_id):
     global current_download_task
 
     current_download_task = None
-    logging.info(f"[RunpodDirect] Download completed: {download_id}, processing next in queue...")
+    logging.info(f"[ServerDirect] Download completed: {download_id}, processing next in queue...")
 
     # Process next in queue
     asyncio.create_task(process_download_queue())
@@ -658,7 +682,7 @@ async def download_file(url, output_path, temp_output_path, download_id, token=N
     """Download file with multi-connection support and progress tracking"""
     import aiohttp
 
-    logging.info(f"[RunpodDirect] Download {download_id} using {NUM_CONNECTIONS} connections (full speed)")
+    logging.info(f"[ServerDirect] Download {download_id} using {NUM_CONNECTIONS} connections (full speed)")
     working_output_path = temp_output_path or output_path
 
     try:
@@ -675,7 +699,7 @@ async def download_file(url, output_path, temp_output_path, download_id, token=N
         auth_headers = {}
         if token and 'huggingface.co' in url:
             auth_headers['Authorization'] = f'Bearer {token}'
-            logging.info(f"[RunpodDirect] Using HF token for {download_id}")
+            logging.info(f"[ServerDirect] Using HF token for {download_id}")
 
         timeout = aiohttp.ClientTimeout(
             total=None,
@@ -911,7 +935,7 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
                             f"({chunk_downloaded}/{chunk_size} bytes)"
                         )
                     logging.warning(
-                        f"[RunpodDirect] Chunk {chunk_index} incomplete, retry {retries}/{CHUNK_MAX_RETRIES} "
+                        f"[ServerDirect] Chunk {chunk_index} incomplete, retry {retries}/{CHUNK_MAX_RETRIES} "
                         f"at byte {start + chunk_downloaded}"
                     )
                     await asyncio.sleep(1)
@@ -925,7 +949,7 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
                 if retries > CHUNK_MAX_RETRIES:
                     raise Exception(f"Chunk {chunk_index} failed after {CHUNK_MAX_RETRIES} retries: {e}")
                 logging.warning(
-                    f"[RunpodDirect] Chunk {chunk_index} error retry {retries}/{CHUNK_MAX_RETRIES}: {e}"
+                    f"[ServerDirect] Chunk {chunk_index} error retry {retries}/{CHUNK_MAX_RETRIES}: {e}"
                 )
                 await asyncio.sleep(1)
 
@@ -1156,7 +1180,11 @@ async def set_cgroup_ram_patch_status(request):
     """Enable or disable cgroup-aware RAM override."""
     global _cgroup_ram_patch_enabled
     try:
-        if _parse_bool(os.environ.get("RPD_DISABLE_CGROUP_RAM_PATCH"), default=False):
+        if _parse_bool(
+            os.environ.get("SD_DISABLE_CGROUP_RAM_PATCH")
+            or os.environ.get("RPD_DISABLE_CGROUP_RAM_PATCH"),
+            default=False
+        ):
             return web.json_response({
                 "success": False,
                 "enabled": False,
@@ -1460,13 +1488,15 @@ async def validate_hf_token(request):
         return web.json_response({"valid": False, "error": str(e)}, status=500)
 
 
-@PromptServer.instance.routes.get("/extensions/ComfyUI-RunpodDirect/serverDownload.js")
+@PromptServer.instance.routes.get(f"/extensions/{_EXTENSION_DIR_NAME}/serverDownload.js")
 async def serve_js_with_version(request):
-    """Serve JS file with cache-busting headers"""
+    """Serve JS file with cache-busting headers and explicit Content-Type for ES module compatibility."""
     js_path = os.path.join(os.path.dirname(__file__), "web", "serverDownload.js")
 
     response = web.FileResponse(js_path)
-    # Add cache control headers to force revalidation
+    # Explicitly set MIME type — minimal Docker images (Alpine, etc.) may lack a
+    # complete mimetypes database, causing browsers to reject the ES module import.
+    response.headers['Content-Type'] = 'application/javascript; charset=utf-8'
     response.headers['Cache-Control'] = 'no-cache, must-revalidate'
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
@@ -1479,7 +1509,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.10"
+__version__ = "1.1.0"
 
 # Apply cgroup-aware RAM patch, then load persisted settings, then start keepalive.
 _patch_comfy_ram_detection_for_cgroups()
