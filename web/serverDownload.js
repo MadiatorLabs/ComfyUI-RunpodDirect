@@ -45,8 +45,8 @@ function debugLog(...args) {
 }
 
 // ComfyUI RunpodDirect Extension
-// Version: 1.0.10
-debugLog('[RunpodDirect] v1.0.10');
+// Version: 1.0.11
+debugLog('[RunpodDirect] v1.0.11');
 
 // Track download states
 const downloadStates = new Map();
@@ -1389,14 +1389,25 @@ function getVueRootElement() {
         || document.getElementById('app');
 }
 
-function getMissingModelsDialogState() {
+function getPiniaStore(storeId) {
     const rootEl = getVueRootElement();
     if (!rootEl) return null;
     const vueApp = rootEl.__vue_app__;
     if (!vueApp) return null;
     const pinia = vueApp.config?.globalProperties?.$pinia;
     if (!pinia || !pinia._s) return null;
-    const dialogStore = pinia._s.get('dialog');
+    return pinia._s.get(storeId) || null;
+}
+
+function readStoreValue(value) {
+    if (value && typeof value === 'object' && value.__v_isRef && 'value' in value) {
+        return value.value;
+    }
+    return value;
+}
+
+function getMissingModelsDialogState() {
+    const dialogStore = getPiniaStore('dialog');
     if (!dialogStore) return null;
     const stack = dialogStore.dialogStack;
     if (!Array.isArray(stack)) return null;
@@ -1432,6 +1443,48 @@ function extractModelsFromPinia() {
         })).filter(m => m.filename && m.url),
         paths,
     };
+}
+
+function getMissingModelStoreState() {
+    const missingModelStore = getPiniaStore('missingModel');
+    if (!missingModelStore) return null;
+    const missingModelCandidates = readStoreValue(missingModelStore.missingModelCandidates);
+    const folderPaths = readStoreValue(missingModelStore.folderPaths);
+    return {
+        missingModelStore,
+        missingModelCandidates: Array.isArray(missingModelCandidates)
+            ? missingModelCandidates
+            : [],
+        paths: folderPaths && typeof folderPaths === 'object' && !Array.isArray(folderPaths)
+            ? folderPaths
+            : {},
+    };
+}
+
+function getModelHashType(model) {
+    if (typeof model?.hash_type === 'string') return model.hash_type;
+    if (typeof model?.hashType === 'string') return model.hashType;
+    return null;
+}
+
+function extractModelsFromMissingModelStore() {
+    const state = getMissingModelStoreState();
+    if (!state || !state.missingModelCandidates.length) return null;
+    const models = state.missingModelCandidates
+        .filter((candidate) => candidate && candidate.isMissing !== false)
+        .map((candidate) => ({
+            filename: sanitizeFilename(candidate.name),
+            url: normalizeDownloadUrl(candidate.url),
+            directory: candidate.directory ? String(candidate.directory) : null,
+            hash: typeof candidate.hash === 'string' ? candidate.hash : null,
+            hash_type: getModelHashType(candidate),
+            source: 'missingModelStore',
+            nodeTypes: candidate.nodeType ? [String(candidate.nodeType)] : [],
+        }))
+        .filter(model => model.filename && model.url);
+    if (!models.length) return null;
+    debugLog(`[RunpodDirect] Found ${models.length} models from missingModel store`);
+    return { models, paths: state.paths };
 }
 
 // Fallback: extract model info from DOM when Vue internals aren't accessible
@@ -2142,7 +2195,7 @@ async function collectSmartWorkflowModels(baseModels, folderPaths) {
                     url,
                     directory: m?.directory ? String(m.directory) : null,
                     hash: typeof m?.hash === 'string' ? m.hash : null,
-                    hash_type: typeof m?.hash_type === 'string' ? m.hash_type : null,
+                    hash_type: getModelHashType(m),
                 });
             }
         }
@@ -2159,7 +2212,7 @@ async function collectSmartWorkflowModels(baseModels, folderPaths) {
                 url,
                 directory: m?.directory ? String(m.directory) : null,
                 hash: typeof m?.hash === 'string' ? m.hash : null,
-                hash_type: typeof m?.hash_type === 'string' ? m.hash_type : null,
+                hash_type: getModelHashType(m),
             });
         }
     }
@@ -2244,7 +2297,7 @@ function mergeAndNormalizeModels(baseModels, workflowModels, folderPaths) {
                 url,
                 directory: rawModel.directory || null,
                 hash: typeof rawModel.hash === 'string' ? rawModel.hash : null,
-                hash_type: typeof rawModel.hash_type === 'string' ? rawModel.hash_type : null,
+                hash_type: getModelHashType(rawModel),
                 source: rawModel.source || 'unknown',
                 nodeTypes: Array.isArray(rawModel.nodeTypes) ? rawModel.nodeTypes : [],
                 needsFolderChoice: false,
@@ -2258,7 +2311,7 @@ function mergeAndNormalizeModels(baseModels, workflowModels, folderPaths) {
             }
             if (!existing.directory && rawModel.directory) existing.directory = rawModel.directory;
             if (!existing.hash && rawModel.hash) existing.hash = rawModel.hash;
-            if (!existing.hash_type && rawModel.hash_type) existing.hash_type = rawModel.hash_type;
+            if (!existing.hash_type) existing.hash_type = getModelHashType(rawModel);
             if (Array.isArray(rawModel.nodeTypes)) {
                 existing.nodeTypes = Array.from(new Set([...(existing.nodeTypes || []), ...rawModel.nodeTypes]));
             }
@@ -2560,7 +2613,7 @@ async function collectPreQueueModelCandidatesFromWorkflow(workflow, folderPaths)
                     url: normalizeDownloadUrl(m?.url || ''),
                     directory: m?.directory ? String(m.directory) : null,
                     hash: typeof m?.hash === 'string' ? m.hash : null,
-                    hash_type: typeof m?.hash_type === 'string' ? m.hash_type : null,
+                    hash_type: getModelHashType(m),
                 });
             }
         }
@@ -2577,7 +2630,7 @@ async function collectPreQueueModelCandidatesFromWorkflow(workflow, folderPaths)
                 url: normalizeDownloadUrl(m?.url || ''),
                 directory: m?.directory ? String(m.directory) : null,
                 hash: typeof m?.hash === 'string' ? m.hash : null,
-                hash_type: typeof m?.hash_type === 'string' ? m.hash_type : null,
+                hash_type: getModelHashType(m),
             });
         }
     }
@@ -2807,7 +2860,8 @@ function seedWorkflowModelsForNativeMissingDialog(workflow, report) {
         if (existingKeys.has(dedupeKey)) continue;
         const entry = { name, url, directory };
         if (typeof model?.hash === 'string' && model.hash) entry.hash = model.hash;
-        if (typeof model?.hash_type === 'string' && model.hash_type) entry.hash_type = model.hash_type;
+        const hashType = getModelHashType(model);
+        if (hashType) entry.hash_type = hashType;
         rootModels.push(entry);
         existingKeys.add(dedupeKey);
         added++;
@@ -3617,6 +3671,18 @@ function createFolderPickerSection(dialog, unresolvedModels, selectedFolders, on
 }
 
 function findMissingModelsContainer() {
+    const currentPanelContainer = document.querySelector(
+        '[data-testid="missing-model-importable-rows"], [data-testid="missing-model-import-not-supported-section"]'
+    );
+    if (currentPanelContainer instanceof HTMLElement) {
+        return currentPanelContainer;
+    }
+
+    const currentPanelActions = document.querySelector('[data-testid="missing-model-actions"]');
+    if (currentPanelActions instanceof HTMLElement) {
+        return currentPanelActions;
+    }
+
     const containers = document.querySelectorAll('[class*="scrollbar-custom"][class*="overflow-y-auto"][class*="rounded-lg"]');
     for (const container of containers) {
         const rows = container.querySelectorAll(':scope > div');
@@ -3638,6 +3704,48 @@ function findMissingModelsContainer() {
         }
     }
     return null;
+}
+
+function findMissingModelActionsContainer(container) {
+    const parentActions = container?.parentElement?.querySelector?.('[data-testid="missing-model-actions"]');
+    if (parentActions instanceof HTMLElement) return parentActions;
+
+    const panel = container?.closest?.('[data-testid="error-group-missing-model"]')
+        || container?.closest?.('[data-testid="missing-model-import-not-supported-section"]')?.parentElement
+        || container?.parentElement;
+    const panelActions = panel?.querySelector?.('[data-testid="missing-model-actions"]');
+    if (panelActions instanceof HTMLElement) return panelActions;
+
+    const currentPanelActions = document.querySelector('[data-testid="missing-model-actions"]');
+    return currentPanelActions instanceof HTMLElement ? currentPanelActions : null;
+}
+
+function setTruncatingButtonText(button, text) {
+    let label = button.querySelector(':scope > .server-download-button-label');
+    if (!(label instanceof HTMLElement)) {
+        label = document.createElement('span');
+        label.className = 'server-download-button-label';
+        label.style.display = 'block';
+        label.style.minWidth = '0';
+        label.style.overflow = 'hidden';
+        label.style.textOverflow = 'ellipsis';
+        label.style.whiteSpace = 'nowrap';
+        button.textContent = '';
+        button.appendChild(label);
+    }
+    label.textContent = text;
+    button.setAttribute('aria-label', text);
+}
+
+function applyPanelActionButtonSizing(button, hasSibling = false) {
+    button.style.flex = '1 1 0';
+    button.style.minWidth = '0';
+    button.style.maxWidth = '100%';
+    button.style.overflow = 'hidden';
+    button.style.textOverflow = 'ellipsis';
+    button.style.whiteSpace = 'nowrap';
+    button.style.boxSizing = 'border-box';
+    button.style.marginRight = hasSibling ? '8px' : '0';
 }
 
 function getModelRows(container) {
@@ -3820,7 +3928,16 @@ async function injectServerDownloadButtons() {
             piniaPaths = piniaModels.paths || {};
         }
 
-    // Strategy 2: DOM parsing (fallback - works when buttons with URLs are visible)
+    // Strategy 2: Current right-side Errors panel missing-model store
+        if (!models) {
+            const storeModels = extractModelsFromMissingModelStore();
+            if (storeModels?.models?.length > 0) {
+                models = storeModels.models;
+                piniaPaths = storeModels.paths || {};
+            }
+        }
+
+    // Strategy 3: DOM parsing (fallback - works when buttons with URLs are visible)
         if (!models) {
             const domModels = extractModelsFromDOM(container);
             if (domModels && domModels.length > 0) {
@@ -3829,7 +3946,7 @@ async function injectServerDownloadButtons() {
             }
         }
 
-    // Strategy 3: Footer component fallback
+    // Strategy 4: Footer component fallback
         if (!models) {
             const footerData = extractModelsFromFooter();
             if (footerData && footerData.models?.length > 0) {
@@ -3897,6 +4014,7 @@ async function injectServerDownloadButtons() {
 
         const dialog = container.closest('[role="dialog"]');
         const footerBtnRow = dialog?.querySelector('div[class*="justify-end"][class*="gap"]');
+        const panelActionsRow = findMissingModelActionsContainer(container);
 
         function getResolvedDirectory(model) {
         const selected = selectedFolders.get(model.key);
@@ -3988,7 +4106,7 @@ async function injectServerDownloadButtons() {
         recomputeDownloadList();
         const count = allModelsToDownload.length;
         const unresolvedCount = getUnresolvedModels().length;
-        downloadAllBtn.textContent = `Download to Pod (${count})`;
+        setTruncatingButtonText(downloadAllBtn, `Download to Pod (${count})`);
         // Disable when: no models OR unresolved folders OR gated models exist but token not verified
         const shouldDisable = count === 0 || unresolvedCount > 0 || (hasGated && !gatedVerified);
         if (shouldDisable) {
@@ -4020,7 +4138,7 @@ async function injectServerDownloadButtons() {
         downloadAllBtn.style.pointerEvents = 'auto';
         downloadAllBtn.style.backgroundColor = THEME.success;
         downloadAllBtn.style.color = THEME.foreground;
-        downloadAllBtn.textContent = 'Refresh Page';
+        setTruncatingButtonText(downloadAllBtn, 'Refresh Page');
         downloadAllBtn.onmouseenter = null;
         downloadAllBtn.onmouseleave = null;
         downloadAllBtn.onclick = () => location.reload();
@@ -4031,7 +4149,7 @@ async function injectServerDownloadButtons() {
         downloadAllBtn.disabled = true;
         downloadAllBtn.style.opacity = '0.5';
         downloadAllBtn.style.cursor = 'default';
-        downloadAllBtn.textContent = 'Downloading...';
+        setTruncatingButtonText(downloadAllBtn, 'Downloading...');
 
         downloadQueue = allModelsToDownload.map(m => ({
             url: m.url,
@@ -4058,13 +4176,17 @@ async function injectServerDownloadButtons() {
             if (progressArea) progressArea.remove();
         });
 
-        if (dialog?.querySelector('.server-download-all-btn')) {
+        if (dialog?.querySelector('.server-download-all-btn') || panelActionsRow?.querySelector('.server-download-all-btn')) {
             debugLog('[RunpodDirect] Button already present before insert, skipping duplicate');
             return;
         }
         if (footerBtnRow) {
             // Insert before the native "Download all" button
             footerBtnRow.insertBefore(downloadAllBtn, footerBtnRow.firstChild);
+        } else if (panelActionsRow) {
+            // Current ComfyUI frontend renders missing models in the right-side Errors panel.
+            applyPanelActionButtonSizing(downloadAllBtn, !!panelActionsRow.firstElementChild);
+            panelActionsRow.insertBefore(downloadAllBtn, panelActionsRow.firstChild);
         } else {
             // Fallback: place above the model list
             const fallbackContainer = createEl('div', {
@@ -4087,7 +4209,20 @@ async function injectServerDownloadButtons() {
     }
 }
 
-// MutationObserver for detecting the missing models dialog
+function nodeContainsCurrentMissingModelPanel(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+    const selector = [
+        '[data-testid="missing-model-importable-rows"]',
+        '[data-testid="missing-model-actions"]',
+        '[data-testid="error-group-missing-model"]',
+    ].join(', ');
+    return !!(
+        node.matches?.(selector)
+        || node.querySelector?.(selector)
+    );
+}
+
+// MutationObserver for detecting the missing models dialog or current Errors panel
 function setupDialogObserver() {
     debugLog('[RunpodDirect] Setting up dialog observer');
 
@@ -4099,6 +4234,11 @@ function setupDialogObserver() {
 
                     const isDialog = node.getAttribute?.('role') === 'dialog' ||
                         node.querySelector?.('[role="dialog"]');
+
+                    if (nodeContainsCurrentMissingModelPanel(node)) {
+                        debugLog('[RunpodDirect] Detected missing models panel');
+                        setTimeout(() => injectServerDownloadButtons(), 300);
+                    }
 
                     if (isDialog) {
                         setTimeout(() => {

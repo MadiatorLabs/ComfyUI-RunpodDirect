@@ -1479,7 +1479,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.10"
+__version__ = "1.0.11"
 
 # Apply cgroup-aware RAM patch, then load persisted settings, then start keepalive.
 _patch_comfy_ram_detection_for_cgroups()
