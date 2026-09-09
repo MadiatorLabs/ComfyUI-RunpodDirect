@@ -622,11 +622,21 @@ async def process_download_queue():
 
 
 def on_download_complete(download_id):
-    """Called when a download completes - processes next in queue"""
+    """Advance the queue after a download ends, preserving its actual outcome."""
     global current_download_task
 
     current_download_task = None
-    logging.info(f"[RunpodDirect] Download completed: {download_id}, processing next in queue...")
+    download = active_downloads.get(download_id, {})
+    status = download.get("status", "unknown")
+    if status == "completed":
+        logging.info(f"[RunpodDirect] Download completed: {download_id}, processing next in queue...")
+    elif status == "error":
+        logging.error(
+            f"[RunpodDirect] Download failed: {download_id}: {download.get('error', 'Unknown error')}, "
+            "processing next in queue..."
+        )
+    else:
+        logging.info(f"[RunpodDirect] Download ended ({status}): {download_id}, processing next in queue...")
 
     # Process next in queue
     asyncio.create_task(process_download_queue())
@@ -652,6 +662,30 @@ async def download_chunk(session, url, start, end, output_path, chunk_index, dow
     except Exception as e:
         logging.error(f"Error downloading chunk {chunk_index} for {download_id}: {e}")
         return None
+
+
+class HuggingFaceAccessError(Exception):
+    """Authentication/access failures that must not be retried as network errors."""
+
+
+def _check_hf_access(status_code, url):
+    if 'huggingface.co' not in url or status_code not in (401, 403, 451):
+        return
+    repo_url = url.split('/resolve/', 1)[0]
+    if status_code == 401:
+        message = (
+            "Authentication required. Provide a valid Hugging Face token using HF_TOKEN "
+            "or the HF token input. For gated models, first accept the repository's "
+            f"access terms with the same account. Repo: {repo_url}"
+        )
+    elif status_code == 403:
+        message = (
+            "Access denied. Check that your Hugging Face token has read access and "
+            f"that its account has accepted the model's terms at {repo_url}"
+        )
+    else:
+        message = f"Model access is restricted. Check repository access requirements at {repo_url}"
+    raise HuggingFaceAccessError(message)
 
 
 async def download_file(url, output_path, temp_output_path, download_id, token=None, expected_hash=None, expected_hash_type=None):
@@ -687,32 +721,16 @@ async def download_file(url, output_path, temp_output_path, download_id, token=N
             total_size = 0
             supports_range = False
 
-            # Helper to detect gated/auth errors and produce a useful message
-            def _check_gated_error(status_code, request_url):
-                if status_code in (401, 403, 451) and 'huggingface.co' in request_url:
-                    # Convert download URL to repo URL for the user
-                    # e.g. https://huggingface.co/org/repo/resolve/main/file.ext -> https://huggingface.co/org/repo
-                    repo_url = request_url
-                    resolve_idx = request_url.find('/resolve/')
-                    if resolve_idx != -1:
-                        repo_url = request_url[:resolve_idx]
-                    if status_code == 401:
-                        raise Exception(f"Authentication required. Provide a valid HF token. Repo: {repo_url}")
-                    elif status_code == 403:
-                        raise Exception(f"Access denied — you may need to accept the model's terms at {repo_url}")
-                    elif status_code == 451:
-                        raise Exception(f"Model is restricted. Accept the license agreement at {repo_url}")
-
             try:
                 # Try HEAD request first
                 async with session.head(url, allow_redirects=True) as response:
-                    _check_gated_error(response.status, url)
+                    _check_hf_access(response.status, url)
                     if response.status == 200:
                         total_size = int(response.headers.get('content-length', 0))
                         supports_range = response.headers.get('accept-ranges') == 'bytes'
+            except HuggingFaceAccessError:
+                raise
             except Exception as e:
-                if 'Accept the license' in str(e) or 'Access denied' in str(e) or 'Authentication required' in str(e):
-                    raise
                 logging.warning(f"HEAD request failed for {download_id}: {e}")
 
             # If HEAD didn't give us the size, try GET with Range header
@@ -721,7 +739,7 @@ async def download_file(url, output_path, temp_output_path, download_id, token=N
                 try:
                     headers = {'Range': 'bytes=0-0'}
                     async with session.get(url, headers=headers, allow_redirects=True) as response:
-                        _check_gated_error(response.status, url)
+                        _check_hf_access(response.status, url)
                         if response.status in [200, 206]:
                             # Try to get size from Content-Range header first
                             content_range = response.headers.get('content-range', '')
@@ -735,9 +753,9 @@ async def download_file(url, output_path, temp_output_path, download_id, token=N
                             # Fallback to Content-Length
                             if total_size == 0:
                                 total_size = int(response.headers.get('content-length', 0))
+                except HuggingFaceAccessError:
+                    raise
                 except Exception as e:
-                    if 'Accept the license' in str(e) or 'Access denied' in str(e) or 'Authentication required' in str(e):
-                        raise
                     logging.warning(f"GET with Range failed for {download_id}: {e}")
 
             if total_size == 0:
@@ -863,9 +881,7 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
 
             try:
                 async with session.get(url, headers=headers) as response:
-                    if response.status in (401, 403, 451) and 'huggingface.co' in url:
-                        repo_url = url[:url.find('/resolve/')] if '/resolve/' in url else url
-                        raise Exception(f"Access denied — accept the model's terms at {repo_url}")
+                    _check_hf_access(response.status, url)
                     if response.status not in [200, 206]:
                         raise Exception(f"HTTP {response.status} for chunk {chunk_index}")
 
@@ -918,7 +934,7 @@ async def download_chunk_with_progress(session, url, start, end, output_path, ch
                 else:
                     break
 
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, HuggingFaceAccessError):
                 raise
             except Exception as e:
                 retries += 1
@@ -944,9 +960,7 @@ async def download_single_connection(session, url, output_path, download_id, tot
     downloaded_size = 0
 
     async with session.get(url) as response:
-        if response.status in (401, 403, 451) and 'huggingface.co' in url:
-            repo_url = url[:url.find('/resolve/')] if '/resolve/' in url else url
-            raise Exception(f"Access denied — accept the model's terms at {repo_url}")
+        _check_hf_access(response.status, url)
         if response.status != 200:
             raise Exception(f"HTTP {response.status}")
 
@@ -1479,7 +1493,7 @@ async def serve_js_with_version(request):
 WEB_DIRECTORY = "./web"
 
 # Version for cache busting - increment this when you update the JS
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 
 # Apply cgroup-aware RAM patch, then load persisted settings, then start keepalive.
 _patch_comfy_ram_detection_for_cgroups()
