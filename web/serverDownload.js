@@ -45,15 +45,15 @@ function debugLog(...args) {
 }
 
 // ComfyUI RunpodDirect Extension
-// Version: 1.0.11
-debugLog('[RunpodDirect] v1.0.11');
+// Version: 1.0.12
+debugLog('[RunpodDirect] v1.0.12');
 
 // Track download states
 const downloadStates = new Map();
 let downloadQueue = [];
 let isDownloadingAll = false;
-let completedDownloads = 0;
-let totalDownloads = 0;
+let activeDownloadBatch = new Map();
+let downloadProgressListener = null;
 let downloadStartTimes = new Map();
 
 // Session-only HF token (never persisted to disk)
@@ -347,6 +347,39 @@ function statusColor(status) {
     return THEME.primary;
 }
 
+function getDownloadBatchSummary() {
+    const summary = { total: activeDownloadBatch.size, succeeded: 0, failed: 0, cancelled: 0, pending: 0 };
+    for (const downloadId of activeDownloadBatch.keys()) {
+        const status = downloadStates.get(downloadId)?.status;
+        if (status === 'completed') summary.succeeded++;
+        else if (status === 'error') summary.failed++;
+        else if (status === 'cancelled') summary.cancelled++;
+        else summary.pending++;
+    }
+    return summary;
+}
+
+function getDownloadBatchStatusText(summary = getDownloadBatchSummary()) {
+    let text = `${summary.succeeded} succeeded, ${summary.failed} failed`;
+    if (summary.cancelled) text += `, ${summary.cancelled} cancelled`;
+    if (summary.pending) text += `, ${summary.pending} remaining`;
+    return text;
+}
+
+function updateDownloadState(downloadId, state) {
+    downloadStates.set(downloadId, state);
+    window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
+        detail: { download_id: downloadId, ...state }
+    }));
+    if (!isDownloadingAll) return;
+    const summary = getDownloadBatchSummary();
+    if (summary.total > 0 && summary.pending === 0) {
+        isDownloadingAll = false;
+        debugLog('[RunpodDirect] Download batch finished:', summary);
+        window.dispatchEvent(new CustomEvent('serverDownloadAllDone', { detail: summary }));
+    }
+}
+
 // --- WebSocket event listeners ---
 
 api.addEventListener("server_download_progress", ({ detail }) => {
@@ -355,48 +388,21 @@ api.addEventListener("server_download_progress", ({ detail }) => {
         downloadStartTimes.set(download_id, Date.now());
     }
     const speed = calculateSpeed(download_id, downloaded);
-    downloadStates.set(download_id, { status: 'downloading', progress, downloaded, total, speed });
-    window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
-        detail: { download_id, ...downloadStates.get(download_id) }
-    }));
+    updateDownloadState(download_id, { status: 'downloading', progress, downloaded, total, speed });
 });
 
 api.addEventListener("server_download_complete", ({ detail }) => {
     const { download_id, path, size } = detail;
     invalidatePreQueueReportCache();
-    if (isDownloadingAll) {
-        completedDownloads++;
-        debugLog(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed`);
-    }
-    downloadStates.set(download_id, { status: 'completed', progress: 100, path, size });
-    window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
-        detail: { download_id, ...downloadStates.get(download_id) }
-    }));
+    updateDownloadState(download_id, { status: 'completed', progress: 100, path, size });
     debugLog(`Download completed: ${download_id} -> ${path}`);
-    if (isDownloadingAll && completedDownloads >= totalDownloads) {
-        debugLog('[RunpodDirect] All downloads completed!');
-        isDownloadingAll = false;
-        window.dispatchEvent(new CustomEvent('serverDownloadAllDone'));
-    }
 });
 
 api.addEventListener("server_download_error", ({ detail }) => {
     const { download_id, error } = detail;
     invalidatePreQueueReportCache();
-    if (isDownloadingAll) {
-        completedDownloads++;
-        debugLog(`[RunpodDirect] Progress: ${completedDownloads}/${totalDownloads} completed (1 error)`);
-    }
-    downloadStates.set(download_id, { status: 'error', error });
-    window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
-        detail: { download_id, ...downloadStates.get(download_id) }
-    }));
+    updateDownloadState(download_id, { status: 'error', error });
     console.error(`Download error: ${download_id} - ${error}`);
-    if (isDownloadingAll && completedDownloads >= totalDownloads) {
-        debugLog('[RunpodDirect] All downloads completed!');
-        isDownloadingAll = false;
-        window.dispatchEvent(new CustomEvent('serverDownloadAllDone'));
-    }
 });
 
 // --- API functions ---
@@ -499,7 +505,7 @@ async function processDownloadQueue() {
     downloadQueue = [];
     for (const download of downloadsToStart) {
         debugLog(`[RunpodDirect] Queuing download ${download.filename}`);
-        await startServerDownload(
+        const result = await startServerDownload(
             download.url,
             download.directory,
             download.filename,
@@ -507,6 +513,12 @@ async function processDownloadQueue() {
             download.hash || null,
             download.hash_type || null
         );
+        // A rejected POST never produces a backend WebSocket terminal event.
+        if (!result.success) {
+            updateDownloadState(`${download.directory}/${download.filename}`, {
+                status: 'error', error: result.error || 'Could not queue download'
+            });
+        }
     }
     debugLog(`[RunpodDirect] All ${downloadsToStart.length} downloads queued on backend`);
 }
@@ -3271,10 +3283,10 @@ async function validateHfToken(token, urls) {
 //   3. Token valid, ALL gated accessible: green success. Download btn enabled for all.
 //   4. Token valid, SOME need terms: show which models need terms (with links). Download btn disabled.
 //      User can click Accept terms → go to HF → come back → click Verify again.
-function createTokenSection(dialog, gatedModels, gatedWithUrls, callbacks) {
+function createTokenSection(dialog, gatedModels, gatedWithUrls, callbacks, modelListOverride = null) {
     if (document.querySelector('.server-download-token-section')) return;
 
-    const modelList = dialog.querySelector('[class*="scrollbar-custom"][class*="overflow-y-auto"][class*="rounded-lg"]');
+    const modelList = modelListOverride || dialog?.querySelector('[class*="scrollbar-custom"][class*="overflow-y-auto"][class*="rounded-lg"]');
     if (!modelList) return;
 
     const section = createEl('div', {
@@ -3756,6 +3768,7 @@ function getModelRows(container) {
 // --- UI injection (theme-aware, matches ComfyUI design system) ---
 
 function createProgressArea(container) {
+    if (downloadProgressListener) window.removeEventListener('serverDownloadUpdate', downloadProgressListener);
     const existing = document.querySelector('.server-download-progress-area');
     if (existing) existing.remove();
 
@@ -3771,6 +3784,8 @@ function createProgressArea(container) {
     const header = createEl('div', {
         padding: '8px 12px',
         display: 'flex',
+        flexWrap: 'wrap',
+        gap: '4px 12px',
         justifyContent: 'space-between',
         alignItems: 'center',
         borderBottom: `1px solid ${THEME.border}`,
@@ -3783,7 +3798,7 @@ function createProgressArea(container) {
     const headerStatus = createEl('span', {
         fontSize: '0.75rem',
         color: THEME.muted,
-    }, `0/${totalDownloads} completed`);
+    }, getDownloadBatchStatusText());
     headerStatus.id = 'server-download-overall-progress';
     header.appendChild(headerTitle);
     header.appendChild(headerStatus);
@@ -3799,19 +3814,21 @@ function createProgressArea(container) {
     // Insert after the model list container (inside the same parent flex column)
     container.parentElement.insertBefore(area, container.nextSibling);
 
-    window.addEventListener('serverDownloadUpdate', (event) => {
-        const { download_id, status, progress, downloaded, total, speed } = event.detail;
-        if (!isDownloadingAll) return;
+    downloadProgressListener = (event) => {
+        const { download_id, status, progress, downloaded, total, speed, error } = event.detail;
+        if (!activeDownloadBatch.has(download_id)) return;
 
         const overallEl = document.getElementById('server-download-overall-progress');
         if (overallEl) {
-            overallEl.textContent = `${completedDownloads}/${totalDownloads} completed`;
+            overallEl.textContent = getDownloadBatchStatusText();
+            overallEl.style.color = getDownloadBatchSummary().failed ? THEME.error : THEME.muted;
         }
-        updateDownloadProgressItem(download_id, status, progress, downloaded, total, speed);
-    });
+        updateDownloadProgressItem(download_id, status, progress, downloaded, total, speed, error);
+    };
+    window.addEventListener('serverDownloadUpdate', downloadProgressListener);
 }
 
-function updateDownloadProgressItem(download_id, status, progress, downloaded, total, speed) {
+function updateDownloadProgressItem(download_id, status, progress, downloaded, total, speed, error) {
     const itemId = `download-item-${download_id.replace(/\//g, '-')}`;
     const container = document.getElementById('server-download-items-container');
     if (!container) return;
@@ -3823,7 +3840,7 @@ function updateDownloadProgressItem(download_id, status, progress, downloaded, t
         return;
     }
 
-    if ((status === 'completed' || status === 'error') && item && !item.dataset.removing) {
+    if (status === 'completed' && item && !item.dataset.removing) {
         item.dataset.removing = 'true';
         setTimeout(() => { try { if (item && item.parentNode) item.remove(); } catch (e) { /* */ } }, 2000);
     }
@@ -3852,7 +3869,7 @@ function updateDownloadProgressItem(download_id, status, progress, downloaded, t
     }, filename);
     const pctEl = createEl('span', {
         fontSize: '0.75rem', color: THEME.muted, flexShrink: '0', paddingLeft: '8px',
-    }, progressPercent.toFixed(1) + '%');
+    }, status === 'error' ? 'Failed' : status === 'cancelled' ? 'Cancelled' : progressPercent.toFixed(1) + '%');
     nameRow.appendChild(nameEl);
     nameRow.appendChild(pctEl);
     item.appendChild(nameRow);
@@ -3880,6 +3897,78 @@ function updateDownloadProgressItem(download_id, status, progress, downloaded, t
     infoRow.appendChild(createEl('span', {}, speedText));
     infoRow.appendChild(createEl('span', {}, sizeText));
     item.appendChild(infoRow);
+    if (status === 'error') {
+        item.appendChild(createEl('div', {
+            fontSize: '0.75rem', color: THEME.error, lineHeight: '1.4',
+            marginTop: '4px', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+        }, error || 'Download failed. Retry this download.'));
+    }
+}
+
+function showDownloadBatchResult(container, button, summary) {
+    button.disabled = false;
+    button.style.opacity = '1';
+    button.style.cursor = 'pointer';
+    button.onmouseenter = null;
+    button.onmouseleave = null;
+    if (summary.failed === 0 && summary.cancelled === 0) {
+        button.style.backgroundColor = THEME.success;
+        button.title = 'All downloads succeeded. Refresh to load the models';
+        setTruncatingButtonText(button, 'Refresh Page');
+        button.onclick = () => location.reload();
+        document.querySelector('.server-download-progress-area')?.remove();
+        window.removeEventListener('serverDownloadUpdate', downloadProgressListener);
+        downloadProgressListener = null;
+        return;
+    }
+
+    const retryDownloads = Array.from(activeDownloadBatch.entries())
+        .filter(([id]) => ['error', 'cancelled'].includes(downloadStates.get(id)?.status))
+        .map(([, download]) => download);
+    button.style.backgroundColor = THEME.primary;
+    button.title = 'Correct the errors below, then retry the unsuccessful downloads';
+    setTruncatingButtonText(button, `${summary.cancelled ? 'Retry unfinished' : 'Retry failed'} (${retryDownloads.length})`);
+    button.onclick = (event) => {
+        event.stopPropagation();
+        void startDownloadBatch(retryDownloads, container, button);
+    };
+
+    // A gate may only be discovered by the download request (including in the Errors panel).
+    const authFailures = retryDownloads.filter(download => {
+        const error = downloadStates.get(`${download.directory}/${download.filename}`)?.error || '';
+        return download.url.includes('huggingface.co') && /Authentication required|Access denied/i.test(error);
+    });
+    if (authFailures.length) {
+        document.querySelector('.server-download-token-section')?.remove();
+        createTokenSection(null, authFailures, authFailures, {
+            onAllAccessible() {}, onPartialAccess() {}, onFail() {},
+        }, container);
+    }
+}
+
+async function startDownloadBatch(downloads, container, button) {
+    if (isDownloadingAll || downloads.length === 0) return;
+    activeDownloadBatch = new Map(downloads.map(download => {
+        const item = { ...download, filename: sanitizeFilename(download.filename) };
+        return [`${item.directory}/${item.filename}`, item];
+    }));
+    downloadQueue = Array.from(activeDownloadBatch.values());
+    // Reset all members before submitting anything: a fast failure must not finish the batch early.
+    for (const id of activeDownloadBatch.keys()) {
+        downloadStates.set(id, { status: 'queued', progress: 0 });
+        downloadStartTimes.delete(id);
+    }
+    isDownloadingAll = true;
+    button.disabled = true;
+    button.style.opacity = '0.5';
+    button.style.cursor = 'default';
+    button.style.backgroundColor = THEME.primary;
+    setTruncatingButtonText(button, 'Downloading...');
+    createProgressArea(container);
+    window.addEventListener('serverDownloadAllDone', ({ detail }) => {
+        showDownloadBatchResult(container, button, detail);
+    }, { once: true });
+    await processDownloadQueue();
 }
 
 // Export functions
@@ -4058,7 +4147,7 @@ async function injectServerDownloadButtons() {
     }
 
     // Show gated models section if needed
-        if (hasGated && dialog) {
+        if (hasGated) {
             createTokenSection(dialog, gatedModels, gatedWithUrls, {
                 onAllAccessible(_accessibleModels) {
                     // All gated models verified — enable download for everything
@@ -4078,7 +4167,7 @@ async function injectServerDownloadButtons() {
                     updateBtnCount();
                     debugLog('[RunpodDirect] Token validation failed');
                 },
-            });
+            }, container);
         }
 
     // Match ComfyUI's primary button: bg-primary-background text-base-foreground h-8 rounded-lg text-xs
@@ -4132,49 +4221,10 @@ async function injectServerDownloadButtons() {
         downloadAllBtn.onmouseenter = () => { if (!downloadAllBtn.disabled) downloadAllBtn.style.backgroundColor = THEME.primaryHover; };
         downloadAllBtn.onmouseleave = () => { if (!downloadAllBtn.disabled) downloadAllBtn.style.backgroundColor = THEME.primary; };
 
-        function setButtonRefresh() {
-        downloadAllBtn.disabled = false;
-        downloadAllBtn.style.opacity = '1';
-        downloadAllBtn.style.pointerEvents = 'auto';
-        downloadAllBtn.style.backgroundColor = THEME.success;
-        downloadAllBtn.style.color = THEME.foreground;
-        setTruncatingButtonText(downloadAllBtn, 'Refresh Page');
-        downloadAllBtn.onmouseenter = null;
-        downloadAllBtn.onmouseleave = null;
-        downloadAllBtn.onclick = () => location.reload();
-        }
-
         downloadAllBtn.onclick = async (e) => {
         e.stopPropagation();
-        downloadAllBtn.disabled = true;
-        downloadAllBtn.style.opacity = '0.5';
-        downloadAllBtn.style.cursor = 'default';
-        setTruncatingButtonText(downloadAllBtn, 'Downloading...');
-
-        downloadQueue = allModelsToDownload.map(m => ({
-            url: m.url,
-            directory: m.directory,
-            filename: sanitizeFilename(m.filename),
-            hash: m.hash || null,
-            hash_type: m.hash_type || null,
-        }));
-        totalDownloads = allModelsToDownload.length;
-        completedDownloads = 0;
-        isDownloadingAll = true;
-
-        createProgressArea(container);
-
-        if (downloadQueue.length > 0) {
-            processDownloadQueue();
-        }
+        await startDownloadBatch(allModelsToDownload, container, downloadAllBtn);
         };
-
-    // Listen for all downloads completing to show refresh button and remove progress area
-        window.addEventListener('serverDownloadAllDone', () => {
-            setButtonRefresh();
-            const progressArea = document.querySelector('.server-download-progress-area');
-            if (progressArea) progressArea.remove();
-        });
 
         if (dialog?.querySelector('.server-download-all-btn') || panelActionsRow?.querySelector('.server-download-all-btn')) {
             debugLog('[RunpodDirect] Button already present before insert, skipping duplicate');
@@ -4374,8 +4424,5 @@ api.addEventListener("server_download_cancelled", ({ detail }) => {
     const { download_id } = detail;
     invalidatePreQueueReportCache();
     const prev = downloadStates.get(download_id) || {};
-    downloadStates.set(download_id, { ...prev, status: 'cancelled' });
-    window.dispatchEvent(new CustomEvent('serverDownloadUpdate', {
-        detail: { download_id, ...downloadStates.get(download_id) }
-    }));
+    updateDownloadState(download_id, { ...prev, status: 'cancelled' });
 });
